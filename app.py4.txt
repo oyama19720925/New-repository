@@ -1,0 +1,350 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
+from datetime import datetime, timedelta
+import requests
+import json
+import os
+
+# ============================================
+# 🔐 J-Quants API設定（あなたの情報）
+# ============================================
+JQUANTS_API_KEY = "4Xl4a3FwEyaB1N3XHauyU3BOvFegzLKgWKBdAs0TqLU"
+JQUANTS_MAIL = "oyama@miomio.jp"
+JQUANTS_PASSWORD = "347447498885Mm"
+JQUANTS_BASE = "https://api.jquants.com/v2"
+
+# ============================================
+# 📁 ファイルパス設定
+# ============================================
+BASE_DIR = r"C:\stock_system"
+DATA_FILE = os.path.join(BASE_DIR, "stocks_OHLC_20240101.csv")
+
+# ============================================
+# 🔑 J-Quants API認証クラス（v2対応）
+# ============================================
+class JQuantsClient:
+    def __init__(self, api_key, email, password):
+        self.api_key = api_key
+        self.email = email
+        self.password = password
+        self.refresh_token = None
+        self.id_token = None
+        self.base_url = JQUANTS_BASE
+    
+    def get_refresh_token(self):
+        """リフレッシュトークンを取得（v2エンドポイント）"""
+        url = f"{self.base_url}/auth/refresh_token"
+        headers = {
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "mail": self.email,
+            "password": self.password
+        }
+        
+        try:
+            print(f"🔑 リフレッシュトークン取得中...")
+            print(f"  URL: {url}")
+            print(f"  メール: {self.email}")
+            
+            response = requests.post(url, headers=headers, json=payload)
+            print(f"  ステータスコード: {response.status_code}")
+            
+            if response.status_code == 200:
+                data = response.json()
+                self.refresh_token = data.get("refreshToken")
+                print(f"✅ リフレッシュトークン取得成功")
+                return self.refresh_token
+            else:
+                print(f"❌ リフレッシュトークン取得失敗: {response.text}")
+                return None
+                
+        except requests.exceptions.RequestException as e:
+            print(f"❌ 通信エラー: {e}")
+            return None
+    
+    def get_id_token(self):
+        """IDトークンを取得"""
+        if not self.refresh_token:
+            self.get_refresh_token()
+        
+        if not self.refresh_token:
+            print("❌ リフレッシュトークンがありません")
+            return None
+        
+        url = f"{self.base_url}/auth/id_token"
+        headers = {
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "refreshToken": self.refresh_token
+        }
+        
+        try:
+            print(f"🔑 IDトークン取得中...")
+            response = requests.post(url, headers=headers, json=payload)
+            print(f"  ステータスコード: {response.status_code}")
+            
+            if response.status_code == 200:
+                data = response.json()
+                self.id_token = data.get("idToken")
+                print(f"✅ IDトークン取得成功")
+                return self.id_token
+            else:
+                print(f"❌ IDトークン取得失敗: {response.text}")
+                return None
+                
+        except requests.exceptions.RequestException as e:
+            print(f"❌ 通信エラー: {e}")
+            return None
+    
+    def get_fundamental(self, code):
+        """ファンダメンタルデータを取得（v2エンドポイント）"""
+        if not self.id_token:
+            self.get_id_token()
+        
+        if not self.id_token:
+            print(f"❌ 認証に失敗しました")
+            return None
+        
+        url = f"{self.base_url}/fundamental"
+        params = {
+            "code": code
+        }
+        headers = {
+            "Authorization": f"Bearer {self.id_token}"
+        }
+        
+        try:
+            print(f"📊 {code} のファンダメンタルデータ取得中...")
+            response = requests.get(url, headers=headers, params=params)
+            print(f"  ステータスコード: {response.status_code}")
+            
+            if response.status_code == 200:
+                data = response.json()
+                print(f"✅ {code} のファンダメンタルデータ取得成功")
+                return data
+            else:
+                print(f"❌ {code} のファンダメンタルデータ取得失敗: {response.text}")
+                return None
+                
+        except requests.exceptions.RequestException as e:
+            print(f"❌ 通信エラー: {e}")
+            return None
+
+# ============================================
+# 📊 データ読み込み関数
+# ============================================
+@st.cache_data
+def load_stock_data():
+    """CSVファイルから株価データを読み込む"""
+    try:
+        if os.path.exists(DATA_FILE):
+            df = pd.read_csv(DATA_FILE, encoding='utf-8-sig')
+            print(f"✅ データ読み込み成功: {len(df)} 件")
+            return df
+        else:
+            print(f"⚠️ データファイルが見つからないため、ダミーデータを生成します")
+            return generate_dummy_data()
+    except Exception as e:
+        print(f"❌ データ読み込みエラー: {e}")
+        return generate_dummy_data()
+
+def generate_dummy_data():
+    """ダミーデータを生成（テスト用）"""
+    codes = ['7203', '6758', '9984', '8035', '4063']
+    names = ['トヨタ', 'ソニー', 'ソフトバンク', '東京エレクトロン', '信越化学']
+    
+    dfs = []
+    for i, (code, name) in enumerate(zip(codes, names)):
+        dates = pd.date_range(end=datetime.now(), periods=90, freq='D')
+        np.random.seed(int(code))
+        base = np.random.randint(1000, 50000)
+        close = base + np.cumsum(np.random.randn(90) * 50)
+        close = np.maximum(close, 100)
+        
+        df = pd.DataFrame({
+            'Date': dates,
+            'Code': code,
+            'Name': name,
+            'Open': close * (1 + np.random.randn(90) * 0.01),
+            'High': close * (1 + np.random.randn(90) * 0.02),
+            'Low': close * (1 - np.random.randn(90) * 0.02),
+            'Close': close,
+            'Volume': np.random.randint(100000, 1000000, 90),
+            'Sector': ['製造業', '電気機器', '通信', '半導体', '化学'][i],
+            'Market': '東証プライム'
+        })
+        dfs.append(df)
+    
+    all_df = pd.concat(dfs, ignore_index=True)
+    return all_df
+
+# ============================================
+# 📈 チャート描画関数
+# ============================================
+def create_candlestick_chart(df, code):
+    """ローソク足チャートを作成"""
+    stock_df = df[df['Code'] == code].copy()
+    
+    fig = go.Figure(data=[go.Candlestick(
+        x=stock_df['Date'],
+        open=stock_df['Open'],
+        high=stock_df['High'],
+        low=stock_df['Low'],
+        close=stock_df['Close'],
+        name='株価'
+    )])
+    
+    # 移動平均線を追加
+    stock_df['MA5'] = stock_df['Close'].rolling(window=5).mean()
+    stock_df['MA25'] = stock_df['Close'].rolling(window=25).mean()
+    
+    fig.add_trace(go.Scatter(
+        x=stock_df['Date'],
+        y=stock_df['MA5'],
+        mode='lines',
+        name='MA5',
+        line=dict(color='blue', width=1)
+    ))
+    
+    fig.add_trace(go.Scatter(
+        x=stock_df['Date'],
+        y=stock_df['MA25'],
+        mode='lines',
+        name='MA25',
+        line=dict(color='orange', width=1)
+    ))
+    
+    fig.update_layout(
+        title=f'{code} 株価チャート',
+        xaxis_title='日付',
+        yaxis_title='株価',
+        xaxis_rangeslider_visible=False,
+        template='plotly_white',
+        height=600
+    )
+    
+    return fig
+
+# ============================================
+# 🏠 メインアプリ
+# ============================================
+def main():
+    st.set_page_config(
+        page_title="株価分析システム",
+        page_icon="📈",
+        layout="wide"
+    )
+    
+    st.title("📈 株価分析ダッシュボード")
+    
+    # サイドバー設定
+    with st.sidebar:
+        st.header("⚙️ 設定")
+        
+        # 認証情報の表示（固定値を使用）
+        st.subheader("🔐 J-Quants認証")
+        st.success("✅ API設定済み")
+        st.info(f"メール: {JQUANTS_MAIL}")
+        
+        # データ読み込み
+        st.subheader("📊 データ")
+        df = load_stock_data()
+        
+        # 銘柄選択
+        st.subheader("🔍 銘柄選択")
+        if df is not None and not df.empty:
+            codes = sorted(df['Code'].unique())
+            selected_code = st.selectbox("銘柄コード", codes)
+        else:
+            selected_code = "7203"
+        
+        # 表示期間
+        st.subheader("📅 表示期間")
+        period = st.selectbox("期間", ["1ヶ月", "3ヶ月", "6ヶ月", "1年"], index=1)
+        
+        # データ更新ボタン
+        if st.button("🔄 データ更新"):
+            st.info("データ更新機能は現在開発中です")
+    
+    # メイン画面
+    if df is not None and not df.empty:
+        col1, col2 = st.columns([2, 1])
+        
+        with col1:
+            # チャート表示
+            st.subheader(f"📈 {selected_code} チャート")
+            fig = create_candlestick_chart(df, selected_code)
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # 統計情報
+            st.subheader("📊 統計情報")
+            stock_data = df[df['Code'] == selected_code]
+            if not stock_data.empty:
+                latest = stock_data.iloc[-1]
+                col_stats1, col_stats2, col_stats3, col_stats4 = st.columns(4)
+                
+                with col_stats1:
+                    st.metric("最新価格", f"¥{latest['Close']:,.0f}")
+                with col_stats2:
+                    st.metric("出来高", f"{latest['Volume']:,.0f}")
+                with col_stats3:
+                    st.metric("高値", f"¥{stock_data['High'].max():,.0f}")
+                with col_stats4:
+                    st.metric("安値", f"¥{stock_data['Low'].min():,.0f}")
+        
+        with col2:
+            # 銘柄情報
+            st.subheader("ℹ️ 銘柄情報")
+            if not stock_data.empty:
+                latest = stock_data.iloc[-1]
+                st.write(f"**銘柄名:** {latest['Name']}")
+                st.write(f"**セクター:** {latest['Sector']}")
+                st.write(f"**市場:** {latest['Market']}")
+            
+            # ファンダメンタルデータ
+            st.subheader("📋 ファンダメンタルデータ")
+            if st.button("🔍 ファンダメンタルデータを取得"):
+                with st.spinner("データ取得中..."):
+                    # J-Quantsクライアントを初期化（固定値を使用）
+                    client = JQuantsClient(JQUANTS_API_KEY, JQUANTS_MAIL, JQUANTS_PASSWORD)
+                    
+                    # トークン取得をテスト
+                    st.info("🔑 トークン取得を試みています...")
+                    refresh_token = client.get_refresh_token()
+                    
+                    if refresh_token:
+                        st.success("✅ リフレッシュトークン取得成功")
+                        id_token = client.get_id_token()
+                        
+                        if id_token:
+                            st.success("✅ IDトークン取得成功")
+                            fundamental_data = client.get_fundamental(selected_code)
+                            
+                            if fundamental_data:
+                                st.success("✅ ファンダメンタルデータ取得成功")
+                                st.json(fundamental_data)
+                            else:
+                                st.error("❌ ファンダメンタルデータを取得できませんでした")
+                        else:
+                            st.error("❌ IDトークン取得に失敗しました")
+                    else:
+                        st.error("❌ リフレッシュトークン取得に失敗しました")
+                        st.info("メールアドレス・パスワードを確認してください")
+            
+            # ニュース
+            st.subheader("📰 ニュース")
+            st.info("ニュース機能は現在開発中です")
+    
+    else:
+        st.error("データを読み込めませんでした")
+        st.info("CSVファイルが存在するか確認してください")
+
+# ============================================
+# 🚀 アプリ起動
+# ============================================
+if __name__ == "__main__":
+    main()

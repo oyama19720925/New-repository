@@ -1,0 +1,864 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
+import glob
+
+# =============================================
+# ページ設定
+# =============================================
+st.set_page_config(
+    page_title="株スクリーニング＋バックテスト",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# =============================================
+# カスタムCSS（ダークテーマ）
+# =============================================
+st.markdown("""
+<style>
+  .result-row {
+    background: #1a1a2e;
+    border-radius: 8px;
+    padding: 8px 12px;
+    margin: 4px 0;
+    border-left: 3px solid #00d4ff;
+  }
+  .bt-header {
+    background: linear-gradient(90deg, #1a1a2e, #16213e);
+    border-radius: 10px;
+    padding: 12px;
+    text-align: center;
+    margin-bottom: 8px;
+  }
+  .metric-card {
+    background: #16213e;
+    border-radius: 6px;
+    padding: 8px;
+    text-align: center;
+    margin: 3px;
+  }
+</style>
+""", unsafe_allow_html=True)
+
+# =============================================
+# データ読み込み
+# =============================================
+@st.cache_data
+def load_data():
+    import glob
+    import os
+    # ── C:\stock_system フォルダから最新CSVを自動取得 ──
+    search_path = r"C:\stock_system\stocks_OHLC_*.csv"
+    csv_files = glob.glob(search_path)
+
+    if not csv_files:
+        st.error("❌ CSVファイルが見つかりません: C:\\stock_system\\stocks_OHLC_*.csv")
+        return pd.DataFrame()
+
+    # 更新日時が最新のファイルを選択
+    path = max(csv_files, key=os.path.getmtime)
+    print(f"📂 読み込みファイル: {os.path.basename(path)}")
+
+    df = None
+    for enc in ['utf-8', 'utf-8-sig', 'cp932', 'shift-jis']:
+        try:
+            df = pd.read_csv(path, parse_dates=['Date'], encoding=enc)
+            break
+        except:
+            continue
+    if df is None:
+        st.error("❌ CSVファイルの読み込みに失敗しました")
+        return pd.DataFrame()
+
+    # ── 実際の列名を表示（デバッグ用）──
+    print("📋 CSV列名:", df.columns.tolist())
+
+    # 以下は元のコードと同じ（rename_map以降）
+    col = df.columns.tolist()
+    rename_map = {}
+    # ... （以降は変更なし）
+
+    # 市場
+    for name in ['MktNm', 'Market', 'market']:
+        if name in col: rename_map[name] = 'Market'; break
+
+    # 銘柄名
+    for name in ['CoName', 'Name', 'name', '銘柄名']:
+        if name in col: rename_map[name] = 'Name'; break
+
+    # セクター
+    for name in ['S33Nm', 'Sector', 'sector', '業種']:
+        if name in col: rename_map[name] = 'Sector'; break
+
+    # 始値
+    for name in ['O', 'Open', 'open']:
+        if name in col: rename_map[name] = 'Open'; break
+
+    # 高値
+    for name in ['H', 'High', 'high']:
+        if name in col: rename_map[name] = 'High'; break
+
+    # 安値
+    for name in ['L', 'Low', 'low']:
+        if name in col: rename_map[name] = 'Low'; break
+
+    # 終値
+    for name in ['C', 'Close', 'close']:
+        if name in col: rename_map[name] = 'Close'; break
+
+    # 出来高（パターンを広く対応）
+    for name in ['Vo', 'Volume', 'volume', 'vol', 'Vol', 'VOLUME']:
+        if name in col: rename_map[name] = 'Volume'; break
+
+    df.rename(columns=rename_map, inplace=True)
+
+    # ── 必須列の存在確認 ──
+    required = ['Close', 'High', 'Low', 'Open']
+    missing  = [c for c in required if c not in df.columns]
+    if missing:
+        print(f"⚠️ 不足列: {missing}")
+        print(f"   現在の列: {df.columns.tolist()}")
+
+    # Volumeがない場合は0で補完
+    if 'Volume' not in df.columns:
+        df['Volume'] = 0
+        print("⚠️ Volume列が見つからないため0で補完しました")
+
+    df['Code'] = df['Code'].astype(str)
+    return df
+
+# =============================================
+# テクニカル指標計算
+# =============================================
+def calc_indicators(df, params):
+    d = df.copy().sort_values('Date').reset_index(drop=True)
+    
+    # 移動平均
+    s, l = params['ma_short'], params['ma_long']
+    d['MA_s'] = d['Close'].rolling(s).mean()
+    d['MA_l'] = d['Close'].rolling(l).mean()
+    
+    # RSI
+    rsi_p = params['rsi_period']
+    delta = d['Close'].diff()
+    gain  = delta.clip(lower=0).rolling(rsi_p).mean()
+    loss  = (-delta.clip(upper=0)).rolling(rsi_p).mean()
+    rs    = gain / loss.replace(0, np.nan)
+    d['RSI'] = 100 - 100 / (1 + rs)
+    
+    # ストキャスティクス
+    k_p, d_p = params['stoch_k'], params['stoch_d']
+    lo  = d['Low'].rolling(k_p).min()
+    hi  = d['High'].rolling(k_p).max()
+    d['%K'] = (d['Close'] - lo) / (hi - lo + 1e-9) * 100
+    d['%D'] = d['%K'].rolling(d_p).mean()
+    
+    # MACD
+    d['EMA12'] = d['Close'].ewm(span=12).mean()
+    d['EMA26'] = d['Close'].ewm(span=26).mean()
+    d['MACD']  = d['EMA12'] - d['EMA26']
+    d['Signal_MACD'] = d['MACD'].ewm(span=9).mean()
+    
+    # ボリンジャーバンド
+    bb_p = params['bb_period']
+    d['BB_mid'] = d['Close'].rolling(bb_p).mean()
+    d['BB_std'] = d['Close'].rolling(bb_p).std()
+    d['BB_up']  = d['BB_mid'] + 2 * d['BB_std']
+    d['BB_lo']  = d['BB_mid'] - 2 * d['BB_std']
+    d['BB_%B']  = (d['Close'] - d['BB_lo']) / (d['BB_up'] - d['BB_lo'] + 1e-9) * 100
+    
+    # 出来高移動平均
+  # 出来高列の存在確認
+    if 'Volume' in d.columns:
+        d['Vol_MA'] = d['Volume'].rolling(20).mean()
+    else:
+        d['Vol_MA'] = 0
+    
+    return d
+
+# =============================================
+# スクリーニング判定
+# =============================================
+def screen_stock(d, params, flags):
+    if len(d) < 5:
+        return False, {}
+    
+    last = d.iloc[-1]
+    prev = d.iloc[-2]
+    info = {}
+    
+    passed = True
+    
+    # ── 移動平均ゴールデンクロス ──
+    if flags.get('use_ma', False):
+        gc = (prev['MA_s'] <= prev['MA_l']) and (last['MA_s'] > last['MA_l'])
+        ma_ok = gc if params['ma_cond'] == 'ゴールデンクロス' else (last['MA_s'] > last['MA_l'])
+        info['MA'] = '✅' if ma_ok else '❌'
+        if not ma_ok:
+            passed = False
+    
+    # ── RSI ──
+    if flags.get('use_rsi', False):
+        rsi_val = last['RSI']
+        rsi_ok  = params['rsi_lo'] <= rsi_val <= params['rsi_hi']
+        info['RSI'] = f"{'✅' if rsi_ok else '❌'} {rsi_val:.1f}"
+        if not rsi_ok:
+            passed = False
+    
+    # ── ストキャスティクス ──
+    if flags.get('use_stoch', False):
+        k_val = last['%K']
+        d_val = last['%D']
+        pk    = prev['%K']
+        pd_   = prev['%D']
+        
+        cond = params['stoch_cond']
+        if cond == '%Kが%Dを上抜け（GC）':
+            stoch_ok = (pk <= pd_) and (k_val > d_val)
+        elif cond == '%K < 20（売られすぎ）':
+            stoch_ok = k_val < 20
+        elif cond == '%K > 80（買われすぎ）':
+            stoch_ok = k_val > 80
+        else:
+            stoch_ok = params['stoch_lo'] <= k_val <= params['stoch_hi']
+        
+        info['Stoch'] = f"{'✅' if stoch_ok else '❌'} K:{k_val:.1f} D:{d_val:.1f}"
+        if not stoch_ok:
+            passed = False
+    
+    # ── MACD ──
+    if flags.get('use_macd', False):
+        macd_gc = (prev['MACD'] <= prev['Signal_MACD']) and \
+                  (last['MACD'] > last['Signal_MACD'])
+        info['MACD'] = '✅ GC' if macd_gc else '❌'
+        if not macd_gc:
+            passed = False
+    
+    # ── ボリンジャーバンド ──
+    if flags.get('use_bb', False):
+        bb_ok = last['BB_%B'] <= params['bb_threshold']
+        info['BB'] = f"{'✅' if bb_ok else '❌'} %B:{last['BB_%B']:.1f}"
+        if not bb_ok:
+            passed = False
+    
+    # ── 出来高 ──
+    if flags.get('use_vol', False):
+        vol_ok = last['Volume'] >= last['Vol_MA'] * params['vol_ratio']
+        info['Vol'] = '✅' if vol_ok else '❌'
+        if not vol_ok:
+            passed = False
+    
+    # 直近終値・変化率
+    info['Close']  = last['Close']
+    info['Change'] = (last['Close'] - prev['Close']) / prev['Close'] * 100 \
+                     if prev['Close'] != 0 else 0
+    
+    return passed, info
+
+# =============================================
+# バックテスト
+# =============================================
+def run_backtest(df_stock, short_ma=5, long_ma=25, initial_capital=1_000_000):
+    df = df_stock.copy().sort_values('Date').reset_index(drop=True)
+    if len(df) < long_ma + 5:
+        return None, None
+
+    df['MA_s'] = df['Close'].rolling(short_ma).mean()
+    df['MA_l'] = df['Close'].rolling(long_ma).mean()
+
+    trades, position, buy_price, buy_date, shares, capital = [], 0, 0, None, 0, initial_capital
+    equity, equity_dates = [initial_capital], [df.loc[0, 'Date']]
+
+    for i in range(1, len(df)):
+        ps = df.loc[i-1, 'MA_s']; pl = df.loc[i-1, 'MA_l']
+        cs = df.loc[i,   'MA_s']; cl = df.loc[i,   'MA_l']
+        if pd.isna(ps) or pd.isna(pl):
+            equity.append(capital + position * shares * df.loc[i, 'Close'])
+            equity_dates.append(df.loc[i, 'Date'])
+            continue
+
+        if ps <= pl and cs > cl and position == 0:
+            shares    = max(100, int(capital // df.loc[i, 'Close'] // 100) * 100)
+            buy_price = df.loc[i, 'Close']
+            buy_date  = df.loc[i, 'Date']
+            position  = 1
+            capital  -= shares * buy_price
+
+        elif ps >= pl and cs < cl and position == 1:
+            sp  = df.loc[i, 'Close']
+            pnl = (sp - buy_price) * shares
+            capital += shares * sp
+            trades.append({
+                '買日': buy_date, '売日': df.loc[i, 'Date'],
+                '買値': buy_price, '売値': sp,
+                '株数': shares,
+                '損益(円)': round(pnl),
+                '損益率(%)': round((sp - buy_price) / buy_price * 100, 2)
+            })
+            position = 0
+
+        current = capital + position * shares * df.loc[i, 'Close']
+        equity.append(current)
+        equity_dates.append(df.loc[i, 'Date'])
+
+    trades_df = pd.DataFrame(trades)
+    equity_df = pd.DataFrame({'Date': equity_dates, 'Equity': equity})
+    return trades_df, equity_df
+
+
+def calc_summary(trades_df, equity_df, initial_capital=1_000_000):
+    if trades_df is None or len(trades_df) == 0:
+        return {}
+    wins  = trades_df[trades_df['損益(円)'] > 0]
+    loses = trades_df[trades_df['損益(円)'] <= 0]
+    eq    = equity_df['Equity']
+    dd    = ((eq - eq.cummax()) / eq.cummax() * 100).min()
+    
+    trades_df = trades_df.copy()
+    trades_df['保有日数'] = (
+        pd.to_datetime(trades_df['売日']) - pd.to_datetime(trades_df['買日'])
+    ).dt.days
+    
+    return {
+        '総損益(円)':   round(trades_df['損益(円)'].sum()),
+        '勝率(%)':      round(len(wins)/len(trades_df)*100, 1),
+        '総取引数':     len(trades_df),
+        '勝':           len(wins),
+        '負':           len(loses),
+        'PF':           round(abs(wins['損益(円)'].sum() / loses['損益(円)'].sum()), 2)
+                        if loses['損益(円)'].sum() != 0 else 999,
+        '最大DD(%)':    round(dd, 2),
+        '平均保有日数': round(trades_df['保有日数'].mean(), 1),
+        '最終資産(円)': round(eq.iloc[-1]),
+        'リターン(%)':  round((eq.iloc[-1] - initial_capital) / initial_capital * 100, 2)
+    }
+
+# =============================================
+# グラフ描画
+# =============================================
+def plot_equity(equity_df, trades_df, name, color):
+    fig = make_subplots(
+        rows=2, cols=1, row_heights=[0.7, 0.3],
+        shared_xaxes=True,
+        subplot_titles=('資産推移', 'ドローダウン'),
+        vertical_spacing=0.08
+    )
+    r, g, b = int(color[1:3],16), int(color[3:5],16), int(color[5:7],16)
+
+    fig.add_trace(go.Scatter(
+        x=equity_df['Date'], y=equity_df['Equity'],
+        mode='lines', line=dict(color=color, width=2),
+        fill='tozeroy', fillcolor=f'rgba({r},{g},{b},0.1)',
+        name='資産'
+    ), row=1, col=1)
+
+    if trades_df is not None and len(trades_df) > 0:
+        for _, t in trades_df.iterrows():
+            be = equity_df[equity_df['Date'] <= t['買日']]['Equity']
+            se = equity_df[equity_df['Date'] <= t['売日']]['Equity']
+            if len(be) > 0:
+                fig.add_trace(go.Scatter(
+                    x=[t['買日']], y=[be.iloc[-1]],
+                    mode='markers',
+                    marker=dict(symbol='triangle-up', size=9, color='lime'),
+                    showlegend=False
+                ), row=1, col=1)
+            if len(se) > 0:
+                mc = 'red' if t['損益(円)'] < 0 else 'deepskyblue'
+                fig.add_trace(go.Scatter(
+                    x=[t['売日']], y=[se.iloc[-1]],
+                    mode='markers',
+                    marker=dict(symbol='triangle-down', size=9, color=mc),
+                    showlegend=False
+                ), row=1, col=1)
+
+    eq  = equity_df['Equity']
+    dd  = (eq - eq.cummax()) / eq.cummax() * 100
+    fig.add_trace(go.Scatter(
+        x=equity_df['Date'], y=dd,
+        mode='lines', line=dict(color='tomato', width=1),
+        fill='tozeroy', fillcolor='rgba(255,99,71,0.2)', name='DD'
+    ), row=2, col=1)
+
+    fig.update_layout(
+        title=f'{name}', height=360,
+        margin=dict(l=5, r=5, t=50, b=5),
+        showlegend=False,
+        plot_bgcolor='#0e1117', paper_bgcolor='#0e1117',
+        font=dict(color='white')
+    )
+    fig.update_xaxes(gridcolor='#333')
+    fig.update_yaxes(gridcolor='#333')
+    return fig
+
+
+def plot_heatmap(trades_df, name):
+    if trades_df is None or len(trades_df) == 0:
+        return None
+    df = trades_df.copy()
+    df['売日'] = pd.to_datetime(df['売日'])
+    df['年']   = df['売日'].dt.year
+    df['月']   = df['売日'].dt.month
+    pivot = df.pivot_table(
+        index='年', columns='月',
+        values='損益(円)', aggfunc='sum'
+    ).fillna(0)
+    mn = {1:'1月',2:'2月',3:'3月',4:'4月',5:'5月',6:'6月',
+          7:'7月',8:'8月',9:'9月',10:'10月',11:'11月',12:'12月'}
+    pivot.columns = [mn.get(c, c) for c in pivot.columns]
+    fig = px.imshow(
+        pivot, color_continuous_scale='RdYlGn',
+        color_continuous_midpoint=0, text_auto=True,
+        aspect='auto', title=f'{name} 月別損益'
+    )
+    fig.update_layout(
+        height=180, margin=dict(l=5,r=5,t=40,b=5),
+        plot_bgcolor='#0e1117', paper_bgcolor='#0e1117',
+        font=dict(color='white'), coloraxis_showscale=False
+    )
+    return fig
+
+
+def render_summary(summary, color):
+    if not summary:
+        st.warning("トレードなし")
+        return
+    pc = "#00ff88" if summary['総損益(円)'] >= 0 else "#ff4444"
+    rc = "#00ff88" if summary['リターン(%)'] >= 0 else "#ff4444"
+    st.markdown(f"""
+    <div style='border-left:4px solid {color}; background:#1a1a2e;
+                border-radius:8px; padding:10px;'>
+      <div style='display:grid; grid-template-columns:1fr 1fr; gap:6px;'>
+        <div class='metric-card'>
+          <div style='font-size:10px;color:#888;'>💰 総損益</div>
+          <div style='font-size:15px;font-weight:bold;color:{pc};'>{summary['総損益(円)']:,}円</div>
+        </div>
+        <div class='metric-card'>
+          <div style='font-size:10px;color:#888;'>📈 リターン</div>
+          <div style='font-size:15px;font-weight:bold;color:{rc};'>{summary['リターン(%)']:+.2f}%</div>
+        </div>
+        <div class='metric-card'>
+          <div style='font-size:10px;color:#888;'>🏆 勝率</div>
+          <div style='font-size:14px;font-weight:bold;color:white;'>{summary['勝率(%)']:.1f}%</div>
+        </div>
+        <div class='metric-card'>
+          <div style='font-size:10px;color:#888;'>🔢 取引数</div>
+          <div style='font-size:14px;font-weight:bold;color:white;'>{summary['総取引数']}回</div>
+        </div>
+        <div class='metric-card'>
+          <div style='font-size:10px;color:#888;'>📊 PF</div>
+          <div style='font-size:14px;font-weight:bold;color:white;'>{summary['PF']}</div>
+        </div>
+        <div class='metric-card'>
+          <div style='font-size:10px;color:#888;'>📉 最大DD</div>
+          <div style='font-size:14px;font-weight:bold;color:#ff8888;'>{summary['最大DD(%)']}%</div>
+        </div>
+        <div class='metric-card'>
+          <div style='font-size:10px;color:#888;'>⏱️ 平均保有</div>
+          <div style='font-size:14px;font-weight:bold;color:white;'>{summary['平均保有日数']}日</div>
+        </div>
+        <div class='metric-card'>
+          <div style='font-size:10px;color:#888;'>💹 最終資産</div>
+          <div style='font-size:13px;font-weight:bold;color:{pc};'>{summary['最終資産(円)']:,}円</div>
+        </div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+# =============================================
+# サイドバー：設定
+# =============================================
+st.sidebar.title("⚙️ スクリーニング設定")
+
+# ── インジケーター ON/OFF ──
+st.sidebar.markdown("### 📌 インジケーター選択")
+use_ma    = st.sidebar.checkbox("📈 移動平均 MA",        value=True)
+use_rsi   = st.sidebar.checkbox("📊 RSI",                value=False)
+use_stoch = st.sidebar.checkbox("🎯 ストキャスティクス", value=False)
+use_macd  = st.sidebar.checkbox("📉 MACD",               value=False)
+use_bb    = st.sidebar.checkbox("📐 ボリンジャーバンド", value=False)
+use_vol   = st.sidebar.checkbox("📦 出来高",             value=False)
+
+flags = {
+    'use_ma': use_ma, 'use_rsi': use_rsi,
+    'use_stoch': use_stoch, 'use_macd': use_macd,
+    'use_bb': use_bb, 'use_vol': use_vol
+}
+
+# ── パラメータ ──
+st.sidebar.markdown("### 🔧 パラメータ")
+params = {}
+
+if use_ma:
+    st.sidebar.markdown("**移動平均**")
+    params['ma_short'] = st.sidebar.slider("短期MA", 3, 25, 5)
+    params['ma_long']  = st.sidebar.slider("長期MA", 10, 75, 25)
+    params['ma_cond']  = st.sidebar.selectbox(
+        "MA条件", ['ゴールデンクロス', '短期>長期'])
+else:
+    params['ma_short'] = 5; params['ma_long'] = 25
+    params['ma_cond']  = 'ゴールデンクロス'
+
+if use_rsi:
+    st.sidebar.markdown("**RSI**")
+    rsi_range = st.sidebar.slider("RSI範囲", 0, 100, (30, 70))
+    params['rsi_period'] = st.sidebar.slider("RSI期間", 5, 30, 14)
+    params['rsi_lo'] = rsi_range[0]; params['rsi_hi'] = rsi_range[1]
+else:
+    params['rsi_period'] = 14; params['rsi_lo'] = 0; params['rsi_hi'] = 100
+
+if use_stoch:
+    st.sidebar.markdown("**ストキャスティクス**")
+    params['stoch_k']    = st.sidebar.slider("%K期間", 3, 30, 14)
+    params['stoch_d']    = st.sidebar.slider("%D期間", 2, 10, 3)
+    params['stoch_cond'] = st.sidebar.selectbox(
+        "Stoch条件", [
+            '%Kが%Dを上抜け（GC）',
+            '%K < 20（売られすぎ）',
+            '%K > 80（買われすぎ）',
+            '%K範囲指定'
+        ])
+    if params['stoch_cond'] == '%K範囲指定':
+        sr = st.sidebar.slider("Stoch範囲", 0, 100, (20, 80))
+        params['stoch_lo'] = sr[0]; params['stoch_hi'] = sr[1]
+    else:
+        params['stoch_lo'] = 0; params['stoch_hi'] = 100
+else:
+    params['stoch_k'] = 14; params['stoch_d'] = 3
+    params['stoch_cond'] = '%K範囲指定'
+    params['stoch_lo'] = 0; params['stoch_hi'] = 100
+
+if use_macd:
+    st.sidebar.markdown("**MACD**")
+    st.sidebar.info("条件：MACDがシグナルを上抜け（GC）")
+
+if use_bb:
+    st.sidebar.markdown("**ボリンジャーバンド**")
+    params['bb_period']    = st.sidebar.slider("BB期間", 10, 50, 20)
+    params['bb_threshold'] = st.sidebar.slider("%B閾値（以下）", 0, 100, 20)
+else:
+    params['bb_period'] = 20; params['bb_threshold'] = 20
+
+if use_vol:
+    st.sidebar.markdown("**出来高**")
+    params['vol_ratio'] = st.sidebar.slider("出来高比率（MA比）", 1.0, 5.0, 1.5, 0.1)
+else:
+    params['vol_ratio'] = 1.5
+
+# ── バックテスト設定 ──
+st.sidebar.markdown("### 💴 バックテスト設定")
+bt_short = st.sidebar.slider("BT 短期MA", 3, 25, 5, key='bt_s')
+bt_long  = st.sidebar.slider("BT 長期MA", 10, 75, 25, key='bt_l')
+bt_cap   = st.sidebar.number_input(
+    "初期資金(円)", 100_000, 10_000_000, 1_000_000, step=100_000)
+
+# =============================================
+# メイン処理
+# =============================================
+st.title("🔍 株スクリーニング ＋ 📊 バックテスト")
+
+df_all = load_data()
+if df_all.empty:
+    st.error("❌ CSVファイルが見つかりません")
+    st.stop()
+
+# ── スクリーニング実行ボタン ──
+col_btn1, col_btn2 = st.columns([2, 1])
+with col_btn1:
+    run_screen = st.button("🔍 スクリーニング実行", type="primary", use_container_width=True)
+with col_btn2:
+    max_results = st.number_input("最大表示件数", 10, 500, 50, step=10)
+
+# =============================================
+# スクリーニング実行
+# =============================================
+if run_screen:
+    st.session_state['screen_results'] = None
+    st.session_state['checked_codes']  = {}
+    
+    codes = df_all['Code'].unique()
+    results = []
+    
+    progress = st.progress(0, text="スクリーニング中...")
+    total = len(codes)
+    
+    for i, code in enumerate(codes):
+        df_s = df_all[df_all['Code'] == code]
+        if len(df_s) < 30:
+            continue
+        
+        d = calc_indicators(df_s, params)
+        passed, info = screen_stock(d, params, flags)
+        
+        if passed:
+            name   = df_s['Name'].iloc[0]   if 'Name'   in df_s.columns else ''
+            sector = df_s['Sector'].iloc[0]  if 'Sector' in df_s.columns else ''
+            market = df_s['Market'].iloc[0]  if 'Market' in df_s.columns else ''
+            results.append({
+                'Code': code, 'Name': name,
+                'Sector': sector, 'Market': market,
+                'Close': info.get('Close', 0),
+                'Change(%)': round(info.get('Change', 0), 2),
+                'info': info
+            })
+        
+        if i % 50 == 0:
+            progress.progress(i / total, text=f"スクリーニング中... {i}/{total}")
+        
+        if len(results) >= max_results:
+            break
+    
+    progress.empty()
+    st.session_state['screen_results'] = results
+    st.session_state['checked_codes']  = {r['Code']: False for r in results}
+    # result_df を DataFrame として保存
+    import pandas as pd
+    if results:
+        st.session_state['result_df'] = pd.DataFrame(results)
+    else:
+        st.session_state['result_df'] = pd.DataFrame()
+
+# =============================================
+# スクリーニング結果表示
+# =============================================
+if 'screen_results' in st.session_state and st.session_state['screen_results'] is not None:
+    results = st.session_state['screen_results']
+    
+    if len(results) == 0:
+        st.warning("⚠️ 条件に一致する銘柄がありませんでした。条件を緩めてください。")
+    else:
+        st.success(f"✅ {len(results)} 銘柄が条件に一致しました")
+        
+        # ── 一括選択ボタン ──
+        col_all, col_none, col_spacer = st.columns([1, 1, 4])
+        with col_all:
+            if st.button("☑ 全選択"):
+                for r in results:
+                    st.session_state['checked_codes'][r['Code']] = True
+                st.rerun()
+        with col_none:
+            if st.button("☐ 全解除"):
+                for r in results:
+                    st.session_state['checked_codes'][r['Code']] = False
+                st.rerun()
+        
+        st.markdown("---")
+        
+        # ── 結果テーブル（チェックボックス付き）──
+        st.markdown("#### 📋 スクリーニング結果（バックテストする銘柄を選択）")
+        
+        # ヘッダー行
+        h = st.columns([0.5, 1, 2.5, 2, 1.5, 1, 1])
+        h[0].markdown("**選択**")
+        h[1].markdown("**コード**")
+        h[2].markdown("**銘柄名**")
+        h[3].markdown("**セクター**")
+        h[4].markdown("**終値**")
+        h[5].markdown("**騰落率**")
+        h[6].markdown("**シグナル**")
+        
+        st.markdown("<hr style='margin:4px 0;'>", unsafe_allow_html=True)
+        
+        for r in results:
+            code = r['Code']
+            cols = st.columns([0.5, 1, 2.5, 2, 1.5, 1, 1])
+            
+            # チェックボックス
+            checked = st.session_state['checked_codes'].get(code, False)
+            new_check = cols[0].checkbox(
+                "", value=checked, key=f"chk_{code}"
+            )
+            st.session_state['checked_codes'][code] = new_check
+            
+            cols[1].markdown(f"**{code}**")
+            cols[2].markdown(r['Name'])
+            cols[3].markdown(r['Sector'])
+            cols[4].markdown(f"¥{r['Close']:,.0f}")
+            
+            chg = r['Change(%)']
+            chg_color = "🟢" if chg >= 0 else "🔴"
+            cols[5].markdown(f"{chg_color} {chg:+.2f}%")
+            
+            # シグナル表示
+            sig_text = " ".join([f"{k}:{v}" for k, v in r['info'].items()
+                                  if k not in ['Close', 'Change']])
+            cols[6].markdown(f"<small>{sig_text}</small>", unsafe_allow_html=True)
+        
+        st.markdown("---")
+        
+
+        # ══════════════════════════════════════════════
+        # 📊 選択銘柄チャート表示セクション
+        # ══════════════════════════════════════════════
+        st.markdown("---")
+        st.markdown("## 📈 銘柄チャート確認")
+
+        from chart_section import plot_stock_chart
+
+        if 'result_df' in st.session_state and len(st.session_state['result_df']) > 0:
+            result_df = st.session_state['result_df']
+            chart_options = [
+                f"{row['Code']} - {row.get('Name', row['Code'])}"
+                for _, row in result_df.iterrows()
+            ]
+            selected_chart_stocks = st.multiselect(
+                "📌 チャートを表示する銘柄を選択（最大3銘柄）",
+                options=chart_options,
+                default=chart_options[:min(3, len(chart_options))],
+                max_selections=3,
+                key="chart_select"
+            )
+            CHART_COLORS = ["#00bfff", "#ff8800", "#00ff88"]
+            if selected_chart_stocks:
+                for i, sel in enumerate(selected_chart_stocks):
+                    code = sel.split(" - ")[0].strip()
+                    df_s = df_all[df_all["Code"] == code].copy()
+                    if len(df_s) == 0:
+                        st.warning(f"⚠️ {code} のデータが見つかりません")
+                        continue
+                    name  = df_s["Name"].iloc[0] if "Name" in df_s.columns else code
+                    color = CHART_COLORS[i % len(CHART_COLORS)]
+                    fig   = plot_stock_chart(df_s, code, name, color)
+                    st.plotly_chart(fig, use_container_width=True, key=f"chart_{code}")
+
+                    col1, col2, col3, col4 = st.columns(4)
+                    latest = df_s.sort_values("Date").iloc[-1]
+                    prev   = df_s.sort_values("Date").iloc[-2] if len(df_s) > 1 else latest
+                    change     = latest["Close"] - prev["Close"]
+                    change_pct = (change / prev["Close"] * 100) if prev["Close"] != 0 else 0
+                    arrow      = "🔺" if change >= 0 else "🔻"
+                    col1.metric("📅 最終日",         str(latest["Date"])[:10])
+                    col2.metric("💴 終値",           f"¥{latest['Close']:,.0f}")
+                    col3.metric(f"{arrow} 前日比",   f"{change:+,.0f}円",
+                                f"{change_pct:+.2f}%")
+                    col4.metric("📊 出来高",         f"{latest['Volume']:,.0f}")
+                    st.markdown("<br>", unsafe_allow_html=True)
+            else:
+                st.info("👆 上のドロップダウンから銘柄を選択してください")
+        else:
+            st.info("🔍 先にスクリーニングを実行してください")
+
+        st.markdown("---")
+
+        # ── バックテスト実行ボタン ──
+        selected_codes = [
+            code for code, checked
+            in st.session_state['checked_codes'].items() if checked
+        ]
+        
+        st.markdown(f"**選択中: {len(selected_codes)} 銘柄**")
+        
+        if len(selected_codes) > 6:
+            st.warning("⚠️ バックテストは最大6銘柄まで選択してください")
+        
+        run_bt = st.button(
+            f"📊 選択した {len(selected_codes)} 銘柄でバックテスト実行",
+            type="primary",
+            disabled=(len(selected_codes) == 0),
+            use_container_width=True
+        )
+        
+        # =============================================
+        # バックテスト結果表示
+        # =============================================
+        if run_bt or ('bt_results' in st.session_state
+                      and st.session_state.get('bt_codes') == selected_codes):
+            
+            if run_bt:
+                st.session_state['bt_codes'] = selected_codes
+            
+            display_codes = st.session_state.get('bt_codes', selected_codes)
+            
+            if len(display_codes) == 0:
+                st.info("銘柄を選択してください")
+            else:
+                st.markdown("---")
+                st.markdown("## 📊 バックテスト結果")
+                
+                COLORS = [
+                    '#00d4ff', '#ff6b6b', '#ffd93d',
+                    '#6bcb77', '#ff9f43', '#a29bfe'
+                ]
+                
+                # 3列で表示
+                n_cols = min(3, len(display_codes))
+                
+                # 複数行に分けて表示
+                for row_start in range(0, len(display_codes), n_cols):
+                    row_codes  = display_codes[row_start:row_start + n_cols]
+                    bt_columns = st.columns(n_cols)
+                    
+                    for col_idx, code in enumerate(row_codes):
+                        color = COLORS[(row_start + col_idx) % len(COLORS)]
+                        df_s  = df_all[df_all['Code'] == code].copy()
+                        
+                        name   = df_s['Name'].iloc[0]   if 'Name'   in df_s.columns and len(df_s) > 0 else code
+                        sector = df_s['Sector'].iloc[0]  if 'Sector' in df_s.columns and len(df_s) > 0 else '-'
+                        
+                        trades_df, equity_df = run_backtest(
+                            df_s, bt_short, bt_long, bt_cap
+                        )
+                        summary = calc_summary(trades_df, equity_df, bt_cap)
+                        
+                        with bt_columns[col_idx]:
+                            # 銘柄ヘッダー
+                            st.markdown(f"""
+                            <div style='background:{color}22; border:2px solid {color};
+                                        border-radius:10px; padding:10px;
+                                        text-align:center; margin-bottom:8px;'>
+                              <div style='font-size:20px; font-weight:bold; color:{color};'>{code}</div>
+                              <div style='font-size:13px; color:white;'>{name}</div>
+                              <div style='font-size:11px; color:#888;'>{sector}</div>
+                            </div>
+                            """, unsafe_allow_html=True)
+                            
+                            # ① 損益曲線
+                            if equity_df is not None and len(equity_df) > 1:
+                                fig = plot_equity(equity_df, trades_df, name, color)
+                                st.plotly_chart(fig, use_container_width=True,
+                                                key=f'eq_{code}_{row_start}')
+                            else:
+                                st.warning("データ不足")
+                            
+                            # ② サマリーカード
+                            render_summary(summary, color)
+                            
+                            st.markdown("<br>", unsafe_allow_html=True)
+                            
+                            # ③ 月別ヒートマップ
+                            fig_hm = plot_heatmap(trades_df, name)
+                            if fig_hm:
+                                st.plotly_chart(fig_hm, use_container_width=True,
+                                                key=f'hm_{code}_{row_start}')
+                            else:
+                                st.info("📅 ヒートマップ：データなし")
+                    
+                    st.markdown("<br>", unsafe_allow_html=True)
+                
+                # ── トレード詳細（展開式）──
+                st.markdown("---")
+                st.markdown("### 📋 トレード詳細")
+                
+                for code in display_codes:
+                    df_s = df_all[df_all['Code'] == code].copy()
+                    name = df_s['Name'].iloc[0] if 'Name' in df_s.columns and len(df_s) > 0 else code
+                    trades_df, equity_df = run_backtest(df_s, bt_short, bt_long, bt_cap)
+                    
+                    with st.expander(f"📌 {code} {name} のトレード一覧"):
+                        if trades_df is not None and len(trades_df) > 0:
+                            styled = trades_df.style.applymap(
+                                lambda v: 'color:#00ff88' if v > 0 else 'color:#ff4444',
+                                subset=['損益(円)', '損益率(%)']
+                            ).format({
+                                '損益(円)': '{:,}',
+                                '損益率(%)': '{:+.2f}%',
+                                '買値': '{:,.0f}',
+                                '売値': '{:,.0f}'
+                            })
+                            st.dataframe(styled, use_container_width=True)
+                        else:
+                            st.info("トレードなし（データ期間が短い可能性があります）")

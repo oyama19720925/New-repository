@@ -1,0 +1,13 @@
+import pandas as pd
+import glob
+
+# CSVファイルを自動検索
+files = sorted(glob.glob('stocks_OHLC_*.csv'), reverse=True)
+if not files:
+    print("❌ CSVファイルが見つかりません")
+else:
+    path = files[0]
+    print(f"📄 ファイル: {path}")
+    df = pd.read_csv(path, nrows=5, low_memory=False)
+    print(f"\n📋 列名一覧:\n{df.columns.tolist()}")
+    print(f"\n🔍 先頭2行:\n{df.head(2)}")

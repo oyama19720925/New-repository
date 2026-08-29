@@ -1,0 +1,11 @@
+import pandas as pd
+df_ohlc = pd.read_csv("stocks_OHLC_20260515_20260813.csv", dtype={"Code": str})
+print(f"価格データ: {len(df_ohlc):,}行")
+df_names = pd.read_csv("stock_names.csv", dtype={"Code": str})
+print(f"銘柄名データ: {len(df_names):,}行")
+df_names_small = df_names[["Code", "CoName", "S33Nm"]].drop_duplicates(subset="Code")
+df_merged = df_ohlc.merge(df_names_small, on="Code", how="left")
+print(f"マージ後: {len(df_merged):,}行")
+print(df_merged[["Code", "CoName", "S33Nm"]].drop_duplicates().head(10))
+df_merged.to_csv("stocks_OHLC_with_names.csv", index=False, encoding="utf-8-sig")
+print("stocks_OHLC_with_names.csv に保存しました")

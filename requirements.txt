@@ -1,0 +1,13 @@
+<<<<<<< HEAD
+streamlit
+matplotlib
+japanize-matplotlib
+numpy
+reportlab
+=======
+streamlit
+pandas
+numpy
+plotly
+requests
+>>>>>>> cf2cfd1c60e9439a49b21414de0c63423cedc283

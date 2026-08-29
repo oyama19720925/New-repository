@@ -1,0 +1,212 @@
+# fetch_3months.py
+# 直近3ヶ月分のOHLCデータを全銘柄取得してCSVに保存するスクリプト
+
+import requests
+import pandas as pd
+from datetime import datetime, timedelta
+import time
+import os
+
+# ===== 設定 =====
+API_KEY = "4Xl4a3FwEyaB1N3XHauyU3BOvFegzLKgWKBdAs0TqLU"
+BASE_URL = "https://api.jquants.com/v2"
+OUTPUT_DIR = r"C:\stock_system"
+
+HEADERS = {
+    "x-api-key": API_KEY
+}
+
+# ===== 日付設定 =====
+def get_date_range():
+    today = datetime.today()
+    start = today - timedelta(days=92)  # 約3ヶ月前
+    return start.strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d")
+
+# ===== 銘柄マスタ取得 =====
+def get_stock_list():
+    print("銘柄マスタを取得中...")
+    url = f"{BASE_URL}/equities/master"
+    resp = requests.get(url, headers=HEADERS, timeout=30)
+    if resp.status_code != 200:
+        print(f"ERROR: 銘柄マスタ取得失敗 status={resp.status_code}")
+        print(resp.text[:500])
+        return None
+    data = resp.json()
+    # キー名を確認して対応
+    key = None
+    for k in ["equities", "items", "data", "Equities"]:
+        if k in data:
+            key = k
+            break
+    if key is None:
+        print(f"ERROR: 想定外のキー構造: {list(data.keys())}")
+        return None
+    df = pd.DataFrame(data[key])
+    print(f"  銘柄数: {len(df):,}")
+    return df
+
+# ===== OHLCデータ取得（1銘柄） =====
+def fetch_ohlc(code, date_from, date_to, retries=3):
+    url = f"{BASE_URL}/equities/bars/daily"
+    params = {
+        "code": code,
+        "date_from": date_from,
+        "date_to": date_to
+    }
+    for attempt in range(retries):
+        try:
+            resp = requests.get(url, headers=HEADERS, params=params, timeout=30)
+            if resp.status_code == 200:
+                data = resp.json()
+                # キー名を確認して対応
+                key = None
+                for k in ["bars", "daily_bars", "items", "data", "ohlc"]:
+                    if k in data:
+                        key = k
+                        break
+                if key is None:
+                    return None
+                return data[key]
+            elif resp.status_code == 429:
+                print(f"  Rate limit hit, waiting 60s...")
+                time.sleep(60)
+            else:
+                return None
+        except Exception as e:
+            print(f"  Exception for {code}: {e}")
+            time.sleep(5)
+    return None
+
+# ===== メイン処理 =====
+def main():
+    print("=" * 60)
+    print("  fetch_3months.py - 直近3ヶ月OHLCデータ取得")
+    print("=" * 60)
+
+    date_from, date_to = get_date_range()
+    print(f"  取得期間: {date_from} 〜 {date_to}")
+
+    # 銘柄マスタ取得
+    master_df = get_stock_list()
+    if master_df is None:
+        print("銘柄マスタ取得失敗。終了します。")
+        return
+
+    # Code列を確認
+    code_col = None
+    for c in ["Code", "code", "ticker"]:
+        if c in master_df.columns:
+            code_col = c
+            break
+    if code_col is None:
+        print(f"ERROR: Code列が見つかりません。列名: {list(master_df.columns)}")
+        return
+
+    codes = master_df[code_col].astype(str).tolist()
+    print(f"  対象銘柄数: {len(codes):,}")
+
+    # OHLCデータ取得ループ
+    all_records = []
+    total = len(codes)
+    success = 0
+    fail = 0
+
+    print("\nOHLCデータ取得開始...")
+    for i, code in enumerate(codes):
+        records = fetch_ohlc(code, date_from, date_to)
+        if records:
+            all_records.extend(records)
+            success += 1
+        else:
+            fail += 1
+
+        # 進捗表示（100件ごと）
+        if (i + 1) % 100 == 0:
+            print(f"  進捗: {i+1:,}/{total:,} | 成功: {success:,} | 失敗: {fail:,} | レコード数: {len(all_records):,}")
+
+        # API負荷軽減
+        time.sleep(0.2)
+
+    print(f"\n取得完了: 成功={success:,} 失敗={fail:,} 総レコード={len(all_records):,}")
+
+    if not all_records:
+        print("ERROR: データが取得できませんでした。")
+        return
+
+    # DataFrameに変換
+    df = pd.DataFrame(all_records)
+    print(f"  列名: {list(df.columns)}")
+
+    # 列名を標準化
+    col_map = {
+        "date": "Date",
+        "Date": "Date",
+        "code": "Code",
+        "Code": "Code",
+        "open": "Open",
+        "Open": "Open",
+        "high": "High",
+        "High": "High",
+        "low": "Low",
+        "Low": "Low",
+        "close": "Close",
+        "Close": "Close",
+        "volume": "Volume",
+        "Volume": "Volume",
+        "turnoverValue": "Va",
+        "TurnoverValue": "Va",
+        "adjustmentFactor": "AdjFactor",
+        "AdjustmentFactor": "AdjFactor",
+        "adjustmentOpen": "AdjO",
+        "AdjustmentOpen": "AdjO",
+        "adjustmentHigh": "AdjH",
+        "AdjustmentHigh": "AdjH",
+        "adjustmentLow": "AdjL",
+        "AdjustmentLow": "AdjL",
+        "adjustmentClose": "AdjC",
+        "AdjustmentClose": "AdjC",
+        "adjustmentVolume": "AdjVo",
+        "AdjustmentVolume": "AdjVo",
+        "upperLimit": "UL",
+        "UpperLimit": "UL",
+        "lowerLimit": "LL",
+        "LowerLimit": "LL",
+        "morningSession": "MorningSess",
+        "MorningSession": "MorningSess",
+    }
+    df.rename(columns={k: v for k, v in col_map.items() if k in df.columns}, inplace=True)
+
+    # マスタ情報をマージ（Name, Sector, Market, MktCap等）
+    master_cols = [code_col]
+    for col in ["Name", "name", "Sector", "sector", "Market", "market",
+                "MarketCode", "SectorCode", "SectorName", "CompanyName"]:
+        if col in master_df.columns:
+            master_cols.append(col)
+    master_sub = master_df[master_cols].copy()
+    master_sub.rename(columns={code_col: "Code"}, inplace=True)
+    master_sub["Code"] = master_sub["Code"].astype(str)
+    df["Code"] = df["Code"].astype(str)
+    df = df.merge(master_sub, on="Code", how="left")
+
+    # ソート
+    if "Date" in df.columns and "Code" in df.columns:
+        df.sort_values(["Date", "Code"], inplace=True)
+        df.reset_index(drop=True, inplace=True)
+
+    # CSV保存
+    today_str = datetime.today().strftime("%Y%m%d")
+    filename = f"stocks_OHLC_3months_{today_str}.csv"
+    filepath = os.path.join(OUTPUT_DIR, filename)
+    df.to_csv(filepath, index=False, encoding="utf-8-sig")
+
+    print(f"\n保存完了!")
+    print(f"  ファイル: {filepath}")
+    print(f"  レコード数: {len(df):,}")
+    print(f"  銘柄数  : {df['Code'].nunique():,}")
+    if "Date" in df.columns:
+        print(f"  期間    : {df['Date'].min()} 〜 {df['Date'].max()}")
+    print(f"  列名    : {list(df.columns)}")
+    print("\n完了!")
+
+if __name__ == "__main__":
+    main()

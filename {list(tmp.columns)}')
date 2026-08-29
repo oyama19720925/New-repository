@@ -1,0 +1,1 @@
+        print(f'[{"‰¿Ši" if has_price else "‚»‚Ì‘¼"}] {f} -
