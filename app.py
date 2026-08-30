@@ -23,27 +23,66 @@ API_BASE = "https://api.jquants.com/v2"
 CURRENT_PYTHON = sys.executable
 DATA_DIR = os.path.dirname(os.path.abspath(__file__))
 
-st.set_page_config(page_title="株式スクリーニング＆分析システム", layout="wide", page_icon="📈")
+st.set_page_config(page_title="株式スクリーニングシステム", layout="wide", page_icon="📈")
 
-# ===== CSS =====
+# ===== CSS（フォントサイズ調整版） =====
 st.markdown("""
 <style>
-.step-header {
-    background: linear-gradient(90deg, #7c3aed22, transparent);
-    border-left: 4px solid #7c3aed;
-    padding: 8px 16px;
-    border-radius: 0 8px 8px 0;
-    margin: 16px 0 12px 0;
-}
-.metric-box {
-    background: #1e1e2e;
-    border-radius: 8px;
-    padding: 10px 14px;
-    border: 1px solid #313244;
-    margin-bottom: 8px;
-}
-.positive { color: #ef4444; }
-.negative { color: #3b82f6; }
+    /* アプリタイトル・見出しを約1/2に縮小 */
+    h1, .stTitle, .main-title {
+        font-size: 1.3rem !important;
+        font-weight: 700 !important;
+        margin: 0 !important;
+        padding-top: 0.2rem !important;
+        padding-bottom: 0.2rem !important;
+    }
+    .step-header {
+        background: linear-gradient(90deg, #7c3aed22, transparent);
+        border-left: 4px solid #7c3aed;
+        padding: 4px 12px;
+        border-radius: 0 8px 8px 0;
+        margin: 12px 0 8px 0;
+    }
+    .step-header h3 {
+        font-size: 0.95rem !important;
+        margin: 0 !important;
+        padding: 0 !important;
+    }
+    /* 銘柄数・期間などの情報行（メトリクス/キャプション）を1/2に縮小 */
+    .summary-info {
+        font-size: 0.72rem !important;
+        color: #9ca3af !important;
+        margin-top: 2px !important;
+        margin-bottom: 8px !important;
+        line-height: 1.4 !important;
+    }
+    div[data-testid="stMetricValue"] {
+        font-size: 1.0rem !important;
+    }
+    div[data-testid="stMetricLabel"] {
+        font-size: 0.72rem !important;
+    }
+    .stCaption, div[data-testid="stCaptionContainer"] {
+        font-size: 0.72rem !important;
+    }
+    /* 銘柄スクリーニング・検索結果一覧のテーブルフォントを2/3に縮小 */
+    div[data-testid="stDataFrame"] * {
+        font-size: 0.78rem !important;
+    }
+    div[data-testid="stTable"] * {
+        font-size: 0.78rem !important;
+    }
+    /* その他ボックス */
+    .metric-box {
+        background: #1e1e2e;
+        border-radius: 8px;
+        padding: 8px 12px;
+        border: 1px solid #313244;
+        margin-bottom: 8px;
+        font-size: 0.8rem;
+    }
+    .positive { color: #ef4444; }
+    .negative { color: #3b82f6; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -518,7 +557,7 @@ def create_chart(stock_df, code, name, indicators, ma_short_p=5, ma_long_p=25, m
         fig.add_hline(y=20, line_dash="dash", line_color="#22c55e", line_width=1, row=cur_row, col=1)
 
     fig.update_layout(
-        title=dict(text=f"<b>{code}</b> {name}", font=dict(size=14)),
+        title=dict(text=f"<b>{code}</b> {name}", font=dict(size=13)),
         height=height, xaxis_rangeslider_visible=False, template="plotly_dark",
         margin=dict(l=20, r=20, t=35, b=20), showlegend=False
     )
@@ -567,19 +606,19 @@ with st.sidebar:
     st.markdown("### 🗂️ データ管理")
     csv_files = get_csv_files()
     if not csv_files:
-        st.error("CSVファイルが見つかりません。リポジトリまたはフォルダ内に CSV ファイルが存在するか確認してください。")
+        st.error("CSVファイルが見つかりません。")
         st.stop()
 
     csv_labels = [os.path.basename(f) for f in csv_files]
     sel_label = st.selectbox("📂 データファイル", csv_labels, index=0)
     csv_path = csv_files[csv_labels.index(sel_label)]
 
-    if st.button("🚀 最新データ取得", use_container_width=True):
+    if st.button("🚀 最新データ取得", width="stretch"):
         with st.spinner("データ取得中..."):
             try:
                 fetch_script = os.path.join(DATA_DIR, "fetch_clean_db.py")
                 if not os.path.exists(fetch_script):
-                    st.warning("クラウド上では手動ファイル更新またはAPI直接更新を推奨します。")
+                    st.warning("fetch_clean_db.py が見つかりません。")
                 else:
                     env = os.environ.copy()
                     env["PYTHONIOENCODING"] = "utf-8"
@@ -611,7 +650,7 @@ with st.sidebar:
 
         use_eps_growth = st.checkbox("さ来期EPS / 来期EPS 成長率を適用", value=False)
         eps_growth_range = st.slider(
-            "さ来期EPS成長率(%)（例: +100%＝さ来期利益2倍）",
+            "さ来期EPS成長率(%)",
             min_value=-50.0, max_value=1000.0, value=(0.0, 150.0), step=5.0
         ) if use_eps_growth else (-50.0, 1000.0)
 
@@ -645,7 +684,7 @@ with st.sidebar:
         stoch_sd_p = st.slider("SD 期間", 2, 10, 3)
         stoch_range = st.slider("%K 範囲 (最小=売られすぎ, 最大=買われすぎ)", 0, 100, (25, 75))
 
-    do_screen = st.button("🔍 スクリーニング実行", type="primary", use_container_width=True)
+    do_screen = st.button("🔍 スクリーニング実行", type="primary", width="stretch")
 
     st.divider()
 
@@ -707,12 +746,14 @@ with st.sidebar:
 # ========================================================
 df = load_csv(csv_path)
 
-st.markdown("<h1 style='margin-bottom:0'>📈 株式分析・スクリーニングシステム</h1>", unsafe_allow_html=True)
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("📁 データファイル", sel_label[:20] + "…")
-m2.metric("📈 登録銘柄数", f"{df['Code'].nunique():,} 銘柄")
-m3.metric("📅 データ期間", f"{df['Date'].min().date()} ～ {df['Date'].max().date()}")
-m4.metric("📋 総レコード数", f"{len(df):,} 件")
+# タイトル（1/2サイズ調整済み）
+st.markdown('<div class="main-title">📈 株式スクリーニングシステム</div>', unsafe_allow_html=True)
+
+# データベース名を省略し、銘柄数・期間・レコード数を1行で1/2サイズ表示
+st.markdown(
+    f'<div class="summary-info">登録銘柄数: <b>{df["Code"].nunique():,}</b> 銘柄 ｜ データ期間: <b>{df["Date"].min().date()} ～ {df["Date"].max().date()}</b> ｜ 総レコード数: <b>{len(df):,}</b> 件</div>',
+    unsafe_allow_html=True
+)
 
 st.divider()
 
@@ -799,7 +840,7 @@ else:
             "Volume": st.column_config.NumberColumn("出来高", format="%d"),
             "MktCap(百万)": st.column_config.NumberColumn("時価総額(百万)", format="%.0f"),
         },
-        use_container_width=True, hide_index=True, key="stock_selector"
+        width="stretch", hide_index=True, key="stock_selector"
     )
     selected = edited[edited["選択"] == True]["Code"].tolist()
     st.session_state.selected_codes = selected
@@ -825,7 +866,7 @@ else:
                         macd_fast=macd_fast, macd_slow=macd_slow, macd_sig=macd_sig,
                         rsi_p=rsi_p, stoch_k_p=stoch_k_p, stoch_d_p=stoch_d_p, stoch_sd_p=stoch_sd_p,
                         show_vol=ind_vol, height=380
-                    ), use_container_width=True
+                    ), width="stretch"
                 )
 
         # 2. バックテスト
@@ -860,7 +901,7 @@ else:
                         colors = ["#ef4444" if p > 0 else "#3b82f6" for p in trades_df["損益(円)"]]
                         fig_pnl = go.Figure(go.Bar(x=trades_df["エグジット日"].astype(str), y=trades_df["損益(円)"], marker_color=colors))
                         fig_pnl.update_layout(title="個別損益(円)", template="plotly_dark", height=200, margin=dict(l=10, r=10, t=30, b=20))
-                        st.plotly_chart(fig_pnl, use_container_width=True)
+                        st.plotly_chart(fig_pnl, width="stretch")
                 else:
                     st.warning("取引が発生しませんでした。")
 
